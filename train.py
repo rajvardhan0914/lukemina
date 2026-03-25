@@ -1,160 +1,170 @@
+import os
 import torch
-import torch.nn as nn
-import torch.optim as optim
-import numpy as np
-from torchvision import datasets, transforms, models
-from torch.utils.data import DataLoader
+import matplotlib.pyplot as plt
+from sklearn.metrics import precision_score, recall_score, f1_score
 from tqdm import tqdm
 
-device = torch.device("cpu")
+from configs.config import *
+from variliteformer.datasets.leukemia_dataset import get_dataloaders
+from variliteformer.models.resnet_transformer import ResNetTransformer
 
-# =====================================
-# 1. STRONG MEDICAL DATA AUGMENTATION
-# =====================================
-train_transform = transforms.Compose([
-    transforms.Resize((224, 224)),
-    transforms.RandomHorizontalFlip(),
-    transforms.RandomVerticalFlip(),
-    transforms.RandomRotation(20),
-    transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.2),
-    transforms.RandomAffine(degrees=0, translate=(0.05, 0.05)),
-    transforms.ToTensor(),
-    transforms.Normalize([0.5]*3, [0.5]*3)
-])
 
-val_transform = transforms.Compose([
-    transforms.Resize((224, 224)),
-    transforms.ToTensor(),
-    transforms.Normalize([0.5]*3, [0.5]*3)
-])
+def main():
 
-dataset_path = "dataset/C-NMC 2019 (PKG)/C-NMC_training_data/fold_1"
+    device=torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-train_dataset = datasets.ImageFolder(dataset_path, transform=train_transform)
-val_dataset = datasets.ImageFolder(dataset_path, transform=val_transform)
+    train_loader,val_loader=get_dataloaders(DATASET_PATH,IMG_SIZE,BATCH_SIZE)
 
-train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True)
-val_loader = DataLoader(val_dataset, batch_size=16, shuffle=False)
+    model=ResNetTransformer(MODEL_BACKBONE,NUM_CLASSES).to(device)
 
-print("Total Samples:", len(train_dataset))
+    # Safe loss definition (fixes weight mismatch)
+    if NUM_CLASSES==2:
 
-# =====================================
-# 2. MODEL (ResNet18 + Transformer)
-# =====================================
-class LeukemiaModel(nn.Module):
-    def __init__(self):
-        super(LeukemiaModel, self).__init__()
+        class_weights=torch.tensor([1.0,1.4]).to(device)
 
-        self.cnn = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
-        num_features = self.cnn.fc.in_features
-        self.cnn.fc = nn.Identity()
-
-        self.transformer = nn.TransformerEncoder(
-            nn.TransformerEncoderLayer(
-                d_model=num_features,
-                nhead=4,
-                batch_first=True
-            ),
-            num_layers=1
+        criterion=torch.nn.CrossEntropyLoss(
+            weight=class_weights,
+            label_smoothing=0.1
         )
 
-        self.dropout = nn.Dropout(0.3)
-        self.classifier = nn.Linear(num_features, 2)
+    else:
 
-    def forward(self, x):
-        features = self.cnn(x)
-        features = features.unsqueeze(1)
-        features = self.transformer(features)
-        features = features.squeeze(1)
-        features = self.dropout(features)
-        out = self.classifier(features)
-        return out
+        criterion=torch.nn.CrossEntropyLoss(
+            label_smoothing=0.1
+        )
 
-model = LeukemiaModel().to(device)
+    optimizer=torch.optim.AdamW(
+        model.parameters(),
+        lr=LR,
+        weight_decay=1e-4
+    )
 
-# =====================================
-# 3. FOCAL LOSS (BETTER THAN CE)
-# =====================================
-class FocalLoss(nn.Module):
-    def __init__(self, gamma=2, alpha=None):
-        super(FocalLoss, self).__init__()
-        self.gamma = gamma
-        self.alpha = alpha
+    scheduler=torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer,
+        T_max=NUM_EPOCHS
+    )
 
-    def forward(self, inputs, targets):
-        ce_loss = nn.functional.cross_entropy(inputs, targets, reduction='none')
-        pt = torch.exp(-ce_loss)
-        focal_loss = (1 - pt) ** self.gamma * ce_loss
+    scaler=torch.amp.GradScaler(device.type)
 
-        if self.alpha is not None:
-            alpha_t = self.alpha[targets]
-            focal_loss = alpha_t * focal_loss
+    best_acc=0
 
-        return focal_loss.mean()
+    train_losses=[]
+    val_losses=[]
+    precisions=[]
+    recalls=[]
+    f1s=[]
+    accuracies=[]
 
-# Class weights
-targets = train_dataset.targets
-class_counts = np.bincount(targets)
-class_weights = torch.tensor(1.0 / class_counts, dtype=torch.float)
-class_weights = class_weights / class_weights.sum()
+    os.makedirs(OUTPUT_DIR+"/graphs",exist_ok=True)
+    os.makedirs(CHECKPOINT_DIR,exist_ok=True)
 
-criterion = FocalLoss(gamma=2, alpha=class_weights)
+    for epoch in range(NUM_EPOCHS):
 
-optimizer = optim.AdamW(model.parameters(), lr=0.0003)
-scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=15)
+        model.train()
+        running_loss=0
 
-# =====================================
-# 4. TRAINING LOOP
-# =====================================
-best_acc = 0
+        for imgs,labels in tqdm(train_loader,desc=f"Epoch {epoch+1}/{NUM_EPOCHS}"):
 
-for epoch in range(15):
-    print(f"\n📚 Epoch [{epoch+1}/15]")
-    model.train()
+            imgs,labels=imgs.to(device),labels.to(device)
 
-    running_loss = 0
-    correct = 0
-    total = 0
+            optimizer.zero_grad()
 
-    for images, labels in tqdm(train_loader):
-        images, labels = images.to(device), labels.to(device)
+            with torch.amp.autocast(device_type=device.type):
 
-        optimizer.zero_grad()
-        outputs = model(images)
-        loss = criterion(outputs, labels)
-        loss.backward()
-        optimizer.step()
+                out=model(imgs)
 
-        running_loss += loss.item()
-        preds = torch.argmax(outputs, dim=1)
-        correct += (preds == labels).sum().item()
-        total += labels.size(0)
+                loss=criterion(out,labels)
 
-    scheduler.step()
+            scaler.scale(loss).backward()
 
-    train_acc = 100 * correct / total
-    print(f"Train Loss: {running_loss/len(train_loader):.4f}")
-    print(f"Train Accuracy: {train_acc:.2f}%")
+            torch.nn.utils.clip_grad_norm_(model.parameters(),1.0)
 
-    # ---------------- VALIDATION ----------------
-    model.eval()
-    correct = 0
-    total = 0
+            scaler.step(optimizer)
+            scaler.update()
 
-    with torch.no_grad():
-        for images, labels in val_loader:
-            images, labels = images.to(device), labels.to(device)
-            outputs = model(images)
-            preds = torch.argmax(outputs, dim=1)
-            correct += (preds == labels).sum().item()
-            total += labels.size(0)
+            running_loss+=loss.item()
 
-    val_acc = 100 * correct / total
-    print(f"Validation Accuracy: {val_acc:.2f}%")
+        train_loss=running_loss/len(train_loader)
+        train_losses.append(train_loss)
 
-    if val_acc > best_acc:
-        best_acc = val_acc
-        torch.save(model.state_dict(), "best_model.pth")
-        print("💾 Best model saved!")
+        model.eval()
 
-print(f"\n🏆 Best Validation Accuracy Achieved: {best_acc:.2f}%")
+        preds=[]
+        targets=[]
+        val_loss=0
+
+        with torch.no_grad():
+
+            for imgs,labels in val_loader:
+
+                imgs,labels=imgs.to(device),labels.to(device)
+
+                out=model(imgs)
+
+                loss=criterion(out,labels)
+                val_loss+=loss.item()
+
+                p=torch.argmax(out,1)
+
+                preds.extend(p.cpu().numpy())
+                targets.extend(labels.cpu().numpy())
+
+        val_loss/=len(val_loader)
+        val_losses.append(val_loss)
+
+        precision=precision_score(targets,preds)
+        recall=recall_score(targets,preds)
+        f1=f1_score(targets,preds)
+
+        acc=(torch.tensor(preds)==torch.tensor(targets)).float().mean().item()
+
+        precisions.append(precision)
+        recalls.append(recall)
+        f1s.append(f1)
+        accuracies.append(acc)
+
+        print(epoch+1,acc,f1)
+
+        if acc>best_acc:
+
+            best_acc=acc
+
+            torch.save(
+                model.state_dict(),
+                f"{CHECKPOINT_DIR}/best_{MODEL_BACKBONE}.pth"
+            )
+
+        scheduler.step()
+
+    # Graph generation (UNCHANGED)
+
+    plt.figure()
+    plt.plot(train_losses,label="train")
+    plt.plot(val_losses,label="val")
+    plt.legend()
+    plt.title("Loss")
+    plt.savefig(f"{OUTPUT_DIR}/graphs/loss.png")
+
+    plt.figure()
+    plt.plot(accuracies)
+    plt.title("Accuracy")
+    plt.savefig(f"{OUTPUT_DIR}/graphs/accuracy.png")
+
+    plt.figure()
+    plt.plot(precisions)
+    plt.title("Precision")
+    plt.savefig(f"{OUTPUT_DIR}/graphs/precision.png")
+
+    plt.figure()
+    plt.plot(recalls)
+    plt.title("Recall")
+    plt.savefig(f"{OUTPUT_DIR}/graphs/recall.png")
+
+    plt.figure()
+    plt.plot(f1s)
+    plt.title("F1 Score")
+    plt.savefig(f"{OUTPUT_DIR}/graphs/f1.png")
+
+
+if __name__=="__main__":
+    main()

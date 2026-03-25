@@ -1,66 +1,93 @@
 import os
 import cv2
 import torch
-from torch.utils.data import Dataset, DataLoader, random_split
+from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
-from PIL import Image
+from sklearn.model_selection import train_test_split
+
+from segmentation.nucleus_segmenter import segment_nucleus
 
 
 class LeukemiaDataset(Dataset):
-    def __init__(self, root_dir, transform=None):
-        self.root_dir = root_dir
+    """
+    Custom dataset for leukemia cell classification.
+    Applies nucleus segmentation before transform pipeline
+    to support region-adaptive feature extraction.
+    """
+
+    def __init__(self, image_paths, labels, transform=None,
+                 apply_segmentation=True):
+        self.image_paths = image_paths
+        self.labels = labels
         self.transform = transform
-        self.image_paths = []
-        self.labels = []
-
-        self.load_dataset()
-
-    def load_dataset(self):
-        for label_name in ["all", "hem"]:
-            label_folder = os.path.join(self.root_dir, label_name)
-
-            if not os.path.exists(label_folder):
-                continue
-
-            label = 0 if label_name == "all" else 1
-
-            for img_name in os.listdir(label_folder):
-                if img_name.lower().endswith((".png", ".jpg", ".jpeg", ".bmp")):
-                    img_path = os.path.join(label_folder, img_name)
-                    self.image_paths.append(img_path)
-                    self.labels.append(label)
-
-        print(f"Loaded {len(self.image_paths)} images from {self.root_dir}")
+        self.apply_segmentation = apply_segmentation
 
     def __len__(self):
         return len(self.image_paths)
 
     def __getitem__(self, idx):
         img_path = self.image_paths[idx]
-        label = self.labels[idx]
 
-        image = cv2.imread(img_path)
-        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        image = Image.fromarray(image)
+        img = cv2.imread(img_path)
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+        # Region-adaptive preprocessing: isolate nucleus region
+        if self.apply_segmentation:
+            img_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+            img_bgr = segment_nucleus(img_bgr)
+            img = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
 
         if self.transform:
-            image = self.transform(image)
+            img = self.transform(img)
 
-        label = torch.tensor(label, dtype=torch.long)
+        label = torch.tensor(self.labels[idx], dtype=torch.long)
 
-        return image, label
+        return img, label
 
 
-# ---------------------------------------------------
-# TRANSFORMS
-# ---------------------------------------------------
-def get_transforms(img_size=224):
+def get_dataloaders(dataset_path, img_size, batch_size,
+                    apply_segmentation=True):
+    """
+    Build stratified train/val DataLoaders with optional
+    nucleus segmentation for region-adaptive processing.
+    """
+    image_paths = []
+    labels = []
+
+    for class_name in os.listdir(dataset_path):
+        class_path = os.path.join(dataset_path, class_name)
+
+        if not os.path.isdir(class_path):
+            continue
+
+        for img_file in os.listdir(class_path):
+            img_path = os.path.join(class_path, img_file)
+            image_paths.append(img_path)
+
+            # Binary mapping: benign → 0, leukemic → 1
+            if class_name.lower() == "benign":
+                labels.append(0)
+            else:
+                labels.append(1)
+
+    train_paths, val_paths, train_labels, val_labels = train_test_split(
+        image_paths,
+        labels,
+        test_size=0.2,
+        stratify=labels,
+        random_state=42
+    )
 
     train_transform = transforms.Compose([
+        transforms.ToPILImage(),
         transforms.Resize((img_size, img_size)),
         transforms.RandomHorizontalFlip(),
+        transforms.RandomVerticalFlip(),
         transforms.RandomRotation(15),
-        transforms.ColorJitter(brightness=0.2, contrast=0.2),
+        transforms.ColorJitter(
+            brightness=0.2, contrast=0.2,
+            saturation=0.2, hue=0.1
+        ),
         transforms.ToTensor(),
         transforms.Normalize(
             mean=[0.485, 0.456, 0.406],
@@ -69,6 +96,7 @@ def get_transforms(img_size=224):
     ])
 
     val_transform = transforms.Compose([
+        transforms.ToPILImage(),
         transforms.Resize((img_size, img_size)),
         transforms.ToTensor(),
         transforms.Normalize(
@@ -77,38 +105,14 @@ def get_transforms(img_size=224):
         )
     ])
 
-    return train_transform, val_transform
-
-
-# ---------------------------------------------------
-# DATALOADERS WITH 80/20 SPLIT
-# ---------------------------------------------------
-def get_dataloaders(dataset_root, batch_size=8, img_size=224):
-
-    train_transform, val_transform = get_transforms(img_size)
-
-    full_dataset = LeukemiaDataset(
-        root_dir=dataset_root,
-        transform=train_transform
+    train_dataset = LeukemiaDataset(
+        train_paths, train_labels, train_transform,
+        apply_segmentation=apply_segmentation
     )
-
-    total_size = len(full_dataset)
-    train_size = int(0.8 * total_size)
-    val_size = total_size - train_size
-
-    train_dataset, val_dataset = random_split(
-        full_dataset,
-        [train_size, val_size],
-        generator=torch.Generator().manual_seed(42)
+    val_dataset = LeukemiaDataset(
+        val_paths, val_labels, val_transform,
+        apply_segmentation=apply_segmentation
     )
-
-    # Assign correct transforms
-    train_dataset.dataset.transform = train_transform
-    val_dataset.dataset.transform = val_transform
-
-    print(f"Total Samples: {total_size}")
-    print(f"Train Samples: {train_size}")
-    print(f"Validation Samples: {val_size}")
 
     train_loader = DataLoader(
         train_dataset,

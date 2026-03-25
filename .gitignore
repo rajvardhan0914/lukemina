@@ -1,61 +1,31 @@
-# Python
+# Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
-*$py.class
-*.so
-.Python
-env/
+
+# Environments
+.venv/
 venv/
-ENV/
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
+env/
 
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-.DS_Store
-
-# Project specific
-checkpoints/
+# DATASETS (CRITICAL: DO NOT REMOVE THESE)
 dataset/
+datasets/
+ALL_IDB/
+C-NMC/
+*.zip
+*.7z
+
+# Allow the assets folder for README visuals
+!assets/
+!assets/**
+
+# Ignore model weights and logs
 *.pth
-trained_models/
+checkpoints/
 logs/
 runs/
 
-# Output files
-*.png
-confusion_matrix.png
-roc_curve.png
-gradcam_output.png
-training_curves.png
-test_confusion_matrix.png
-evaluation_results.png
-batch_gradcam_output.png
-
-# Jupyter
-.ipynb_checkpoints/
-*.ipynb
-
-# OS
+# Ignore local OS/IDE files
+.vscode/
+.idea/
 .DS_Store
-Thumbs.db
-
-# .venv
-.venv/

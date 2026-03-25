@@ -1,138 +1,131 @@
-import torch
-import torch.nn as nn
-from torchvision import transforms, datasets
-from torch.utils.data import DataLoader
-import numpy as np
-from sklearn.metrics import (accuracy_score, precision_score, recall_score,
-                            f1_score, roc_auc_score, confusion_matrix,
-                            classification_report, roc_curve, auc)
-import matplotlib.pyplot as plt
-import seaborn as sns
 import os
+import torch
+import numpy as np
+import matplotlib.pyplot as plt
 
-from config import Config
-from model import get_model
+from sklearn.metrics import (
+    classification_report,
+    confusion_matrix,
+    roc_curve,
+    auc,
+    precision_recall_curve
+)
+
+from configs.config import *
+from variliteformer.datasets.leukemia_dataset import get_dataloaders
+from variliteformer.models.resnet_transformer import ResNetTransformer
 
 
-def evaluate_model(model_path=Config.BEST_MODEL_PATH, test_dir=Config.VAL_DIR):
-    """Comprehensive model evaluation"""
+def main():
 
-    device = Config.DEVICE
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+    # -----------------------------
+    # Load dataset
+    # -----------------------------
+    _, val_loader = get_dataloaders(DATASET_PATH, IMG_SIZE, BATCH_SIZE)
+
+    # -----------------------------
     # Load model
-    model = get_model('resnet50', Config.NUM_CLASSES, Config.PRETRAINED).to(device)
-    model.load_state_dict(torch.load(model_path, map_location=device))
+    # -----------------------------
+    model = ResNetTransformer(MODEL_BACKBONE, NUM_CLASSES)
+
+    model.load_state_dict(
+        torch.load(f"{CHECKPOINT_DIR}/best_{MODEL_BACKBONE}.pth", map_location=device)
+    )
+
+    model.to(device)
     model.eval()
 
-    # Transform
-    test_transform = transforms.Compose([
-        transforms.Resize((Config.INPUT_SIZE, Config.INPUT_SIZE)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                           std=[0.229, 0.224, 0.225])
-    ])
+    preds = []
+    targets = []
+    probs = []
 
-    # Load test dataset
-    test_dataset = datasets.ImageFolder(test_dir, transform=test_transform)
-    test_loader = DataLoader(test_dataset, batch_size=Config.BATCH_SIZE,
-                            shuffle=False, num_workers=4)
-
-    # Test
-    all_preds = []
-    all_labels = []
-    all_probs = []
-
+    # -----------------------------
+    # Inference
+    # -----------------------------
     with torch.no_grad():
-        for images, labels in test_loader:
-            images = images.to(device)
-            outputs = model(images)
-            probs = torch.nn.functional.softmax(outputs, dim=1)
-            _, predicted = torch.max(outputs.data, 1)
 
-            all_preds.extend(predicted.cpu().numpy())
-            all_labels.extend(labels.cpu().numpy())
-            all_probs.extend(probs[:, 1].cpu().numpy())  # Probability of class 1
+        for imgs, labels in val_loader:
 
-    all_preds = np.array(all_preds)
-    all_labels = np.array(all_labels)
-    all_probs = np.array(all_probs)
+            imgs = imgs.to(device)
 
-    # Calculate metrics
-    accuracy = accuracy_score(all_labels, all_preds)
-    precision = precision_score(all_labels, all_preds, average='weighted')
-    recall = recall_score(all_labels, all_preds, average='weighted')
-    f1 = f1_score(all_labels, all_preds, average='weighted')
-    roc_auc = roc_auc_score(all_labels, all_probs)
+            out = model(imgs)
 
-    conf_matrix = confusion_matrix(all_labels, all_preds)
-    class_report = classification_report(all_labels, all_preds,
-                                        target_names=test_dataset.classes)
+            probabilities = torch.softmax(out, dim=1)
 
-    # Print results
-    print("=" * 60)
-    print("MODEL EVALUATION RESULTS")
-    print("=" * 60)
-    print(f"Accuracy:  {accuracy:.4f}")
-    print(f"Precision: {precision:.4f}")
-    print(f"Recall:    {recall:.4f}")
-    print(f"F1-Score:  {f1:.4f}")
-    print(f"ROC-AUC:   {roc_auc:.4f}")
-    print("\nClassification Report:")
-    print(class_report)
-    print("\nConfusion Matrix:")
-    print(conf_matrix)
+            p = torch.argmax(out, 1)
 
-    # Plot Results
-    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+            preds.extend(p.cpu().numpy())
+            targets.extend(labels.numpy())
+            probs.extend(probabilities[:,1].cpu().numpy())
 
+    # -----------------------------
+    # Classification report
+    # -----------------------------
+    print("\n========= Classification Report =========\n")
+    print(classification_report(targets, preds))
+
+    # -----------------------------
+    # Create output directory
+    # -----------------------------
+    os.makedirs(f"{OUTPUT_DIR}/graphs", exist_ok=True)
+
+    # -----------------------------
     # Confusion Matrix
-    sns.heatmap(conf_matrix, annot=True, fmt='d', cmap='Blues',
-                xticklabels=test_dataset.classes,
-                yticklabels=test_dataset.classes,
-                ax=axes[0, 0])
-    axes[0, 0].set_title('Confusion Matrix')
-    axes[0, 0].set_ylabel('True Label')
-    axes[0, 0].set_xlabel('Predicted Label')
+    # -----------------------------
+    cm = confusion_matrix(targets, preds)
 
-    # ROC Curve
-    fpr, tpr, _ = roc_curve(all_labels, all_probs)
-    axes[0, 1].plot(fpr, tpr, 'b-', label=f'ROC (AUC = {roc_auc:.3f})')
-    axes[0, 1].plot([0, 1], [0, 1], 'r--', label='Random')
-    axes[0, 1].set_xlabel('False Positive Rate')
-    axes[0, 1].set_ylabel('True Positive Rate')
-    axes[0, 1].set_title('ROC Curve')
-    axes[0, 1].legend()
-    axes[0, 1].grid()
+    plt.figure(figsize=(6,6))
+    plt.imshow(cm, cmap="Blues")
+    plt.title("Confusion Matrix")
+    plt.xlabel("Predicted")
+    plt.ylabel("Actual")
 
-    # Metrics Bar Plot
-    metrics = {'Accuracy': accuracy, 'Precision': precision, 'Recall': recall, 'F1': f1}
-    axes[1, 0].bar(metrics.keys(), metrics.values(), color=['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728'])
-    axes[1, 0].set_ylabel('Score')
-    axes[1, 0].set_title('Performance Metrics')
-    axes[1, 0].set_ylim([0, 1])
-    for i, (k, v) in enumerate(metrics.items()):
-        axes[1, 0].text(i, v + 0.02, f'{v:.3f}', ha='center')
-
-    # Prediction Distribution
-    axes[1, 1].hist(all_probs[all_labels == 0], bins=20, alpha=0.7, label='Class 0')
-    axes[1, 1].hist(all_probs[all_labels == 1], bins=20, alpha=0.7, label='Class 1')
-    axes[1, 1].set_xlabel('Predicted Probability')
-    axes[1, 1].set_ylabel('Count')
-    axes[1, 1].set_title('Prediction Distribution')
-    axes[1, 1].legend()
+    for i in range(len(cm)):
+        for j in range(len(cm)):
+            plt.text(j, i, cm[i][j],
+                     ha="center",
+                     va="center",
+                     color="black")
 
     plt.tight_layout()
-    plt.savefig('evaluation_results.png', dpi=150)
-    print("\n📊 Evaluation plots saved!")
+    plt.savefig(f"{OUTPUT_DIR}/graphs/confusion_matrix.png")
+    plt.close()
 
-    return {
-        'accuracy': accuracy,
-        'precision': precision,
-        'recall': recall,
-        'f1': f1,
-        'roc_auc': roc_auc
-    }
+    # -----------------------------
+    # ROC Curve
+    # -----------------------------
+    fpr, tpr, _ = roc_curve(targets, probs)
+    roc_auc = auc(fpr, tpr)
+
+    plt.figure()
+    plt.plot(fpr, tpr, label=f"AUC = {roc_auc:.3f}")
+    plt.plot([0,1],[0,1],'--')
+    plt.xlabel("False Positive Rate")
+    plt.ylabel("True Positive Rate")
+    plt.title("ROC Curve")
+    plt.legend()
+    plt.savefig(f"{OUTPUT_DIR}/graphs/roc_curve.png")
+    plt.close()
+
+    # -----------------------------
+    # Precision-Recall Curve
+    # -----------------------------
+    precision, recall, _ = precision_recall_curve(targets, probs)
+
+    plt.figure()
+    plt.plot(recall, precision)
+    plt.xlabel("Recall")
+    plt.ylabel("Precision")
+    plt.title("Precision-Recall Curve")
+    plt.savefig(f"{OUTPUT_DIR}/graphs/pr_curve.png")
+    plt.close()
+
+    print("\nSaved evaluation graphs in:")
+    print(f"{OUTPUT_DIR}/graphs/")
+    print("\nEvaluation completed successfully")
 
 
 if __name__ == "__main__":
-    evaluate_model()
+    main()
