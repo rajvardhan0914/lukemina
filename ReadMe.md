@@ -6,7 +6,7 @@
 [![Paper](https://img.shields.io/badge/Paper-PhD%20Research-red)](.)
 
 > **Sowjanya Madireddy¹ · Dr. Raghu Indrakanti²**
-> ¹² Department of Computer Science and Engineering, [Your University], India
+> India
 
 ---
 
@@ -232,10 +232,10 @@ N=196 patches for a 224×224 image with 16×16 patch size → 196²=38,416× mor
 If you use this work, please cite:
 
 ```bibtex
-@article{madireddy2025variliteformer,
+@article{reddy2025variliteformer,
   title   = {A Region-Adaptive Lightweight Transformer for Computationally
              Efficient Leukemia Cell Classification},
-  author  = {Madireddy, Sowjanya and Indrakanti, Raghu},
+  author  = {Sowjanya and Indrakant Raghu},
   journal = {[Target Journal]},
   year    = {2025}
 }
